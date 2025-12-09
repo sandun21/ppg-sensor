@@ -59,7 +59,7 @@ void loop() {
   Serial.print("  AC_ptp = "); Serial.print(ac_red_ptp,2);
   Serial.print("  AC_rms = "); Serial.println(ac_red_rms,2);
 
-  delay(200); // short pause before next phase (if desired)
+  delay(20); // short pause before next phase (if desired)
 
   // --- IR phase ---
   digitalWrite(ledRed, LOW);
@@ -108,5 +108,5 @@ void loop() {
   Serial.print("SpO2 (ptp) = "); Serial.print(spo2_ptp,1);
   Serial.print("  SpO2 (rms) = "); Serial.println(spo2_rms,1);
 
-  delay(1000);  // wait a bit before starting next RED cycle
+  delay(20);  // wait a bit before starting next RED cycle
 }
