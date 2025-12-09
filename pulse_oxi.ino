@@ -1,152 +1,112 @@
 // ------------------------------------------------------
-// Pulse-Oximeter Sketch (RED/IR multiplex + ADC + HR + SpO₂)
-// Based on your switching logic + added processing
+// Long-period RED / IR pulse oximeter sketch
+// RED on for 40 s → sample, compute DC_red & AC_red
+// IR  on for 40 s → sample, compute DC_ir  & AC_ir
+// Then compute R and SpO₂
 // ------------------------------------------------------
-const int ledRed  = 9;
-const int ledIR   = 10;
-const int adcPin  = A0;
 
-// const unsigned long onTime        = 220UL;    // µs LED ON
-// const unsigned long cooloffTime   = 320UL;    // µs LED OFF / settle
-// const unsigned long offTime       = 1780UL;   // µs total off interval
-const unsigned long redOonTime    = 220UL;    // µs LED ON
-const unsigned long cooloffTime   = 320UL;    // µs LED OFF / settle
-const unsigned long offTime       = 1780UL;   // µs total off interval
-const unsigned long processingTime= offTime - cooloffTime - onTime;
+const int ledRed = 9;
+const int ledIR  = 10;
+const int adcPin = A0;
 
-unsigned long lastSwitchTime = 0;
-enum Phase { RED_ON, RED_OFF, IR_ON, IR_OFF };
-Phase phase = RED_ON;
-unsigned long phaseStartTime = 0;
-
-const int WINDOW_SIZE = 50;  // number of cycles to buffer for AC/DC
-float redVals[WINDOW_SIZE];
-float irVals [WINDOW_SIZE];
-int   idx = 0;
-bool  bufferFilled = false;
-
-// For heart-rate detection (simple peak detection on IR channel)
-unsigned long lastBeatTime = 0;
-float lastIrVal = 0;
-float beatInterval = 0;
-float heartRate = 0;
+const unsigned long RED_PERIOD_MS = 10000UL;   // 40 seconds
+const unsigned long IR_PERIOD_MS  = 10000UL;   // 40 seconds
+const unsigned long SAMPLE_INTERVAL_MS = 25UL; 
 
 void setup() {
   pinMode(ledRed, OUTPUT);
   pinMode(ledIR,  OUTPUT);
   digitalWrite(ledRed, LOW);
   digitalWrite(ledIR,  LOW);
-
   Serial.begin(115200);
-  phaseStartTime = micros();
-  lastSwitchTime = phaseStartTime;
 }
 
 void loop() {
-  unsigned long now = micros();
-  switch (phase) {
-    case RED_ON:
-      digitalWrite(ledRed, HIGH);
-      digitalWrite(ledIR,  LOW);
-      if (now - phaseStartTime >= onTime) {
-        // read ADC for RED
-        int raw = analogRead(adcPin);
-        redVals[idx] = raw;
-        // move to next phase
-        phase = RED_OFF;
-        phaseStartTime = now;
-      }
-      break;
+  // --- RED phase ---
+  digitalWrite(ledRed, HIGH);
+  digitalWrite(ledIR,  LOW);
 
-    case RED_OFF:
-      digitalWrite(ledRed, LOW);
-      digitalWrite(ledIR,  LOW);
-      if (now - phaseStartTime >= cooloffTime){
-        phase = IR_ON;
-        phaseStartTime = now;
-      }
-      break;
+  unsigned long t0 = millis();
+  unsigned long nextSample = t0;
+  
+  // Variables to collect RED measurements
+  const int MAX_SAMPLES = RED_PERIOD_MS / SAMPLE_INTERVAL_MS + 10;
+  float redSum = 0;
+  float redSqSum = 0;
+  int   redMin = 1023, redMax = 0;
+  int   redCount = 0;
 
-    case IR_ON:
-      digitalWrite(ledRed, LOW);
-      digitalWrite(ledIR,  HIGH);
-      if (now - phaseStartTime >= onTime) {
-        // read ADC for IR
-        int raw = analogRead(adcPin);
-        irVals[idx] = raw;
-
-        // heart-rate: simple threshold/edge detection
-        float currentIr = raw;
-        if (lastIrVal > 0) {
-          // detect upward edge: simple heuristic
-          if (currentIr > lastIrVal + 20) {  // threshold
-            unsigned long t = now;
-            if (lastBeatTime > 0) {
-              beatInterval = (t - lastBeatTime) * 1e-6; // seconds
-              heartRate = 60.0 / beatInterval; // bpm
-            }
-            lastBeatTime = t;
-          }
-        }
-        lastIrVal = currentIr;
-
-        // update buffer index
-        idx++;
-        if (idx >= WINDOW_SIZE) {
-          idx = 0;
-          bufferFilled = true;
-        }
-
-        // move to next phase
-        phase = IR_OFF;
-        phaseStartTime = now;
-      }
-      break;
-
-    case IR_OFF:
-      digitalWrite(ledRed, LOW);
-      digitalWrite(ledIR,  LOW);
-      if (now - phaseStartTime >= processingTime) {
-        // buffer full? compute SpO₂
-        if (bufferFilled) {
-          // compute DC & AC for RED
-          float sumR = 0, minR = redVals[0], maxR = redVals[0];
-
-          for (int i = 0; i < WINDOW_SIZE; i++) {
-            float v = redVals[i];
-            sumR += v;
-            if (v < minR) minR = v;
-            if (v > maxR) maxR = v;
-          }
-
-          float dc_red = sumR / WINDOW_SIZE;
-          float ac_red = maxR - minR;
-
-          // compute DC & AC for IR
-          float sumIR = 0, minIR = irVals[0], maxIR = irVals[0];
-          for (int i = 0; i < WINDOW_SIZE; i++) {
-            float v = irVals[i];
-            sumIR += v;
-            if (v < minIR) minIR = v;
-            if (v > maxIR) maxIR = v;
-          }
-          float dc_ir = sumIR / WINDOW_SIZE;
-          float ac_ir = maxIR - minIR;
-
-          // ratio and SpO₂ estimation
-          float R = (ac_red / dc_red) / (ac_ir / dc_ir);
-          float spo2 = 110.0 - 25.0 * R;
-          if (spo2 > 100) spo2 = 100;
-          if (spo2 < 0)   spo2 = 0;
-
-          // print results
-          Serial.print("HR(bpm): ");   Serial.print(heartRate,1);
-          Serial.print("  SpO2(%): "); Serial.println(spo2,1);
-        }
-
-        phase = RED_ON;
-        phaseStartTime = now;
-      }
-      break;
+  while (millis() - t0 < RED_PERIOD_MS) {
+    unsigned long now = millis();
+    if (now >= nextSample) {
+      int v = analogRead(adcPin);
+      redSum   += v;
+      redSqSum += (float)v * v;
+      if (v < redMin) redMin = v;
+      if (v > redMax) redMax = v;
+      redCount++;
+      nextSample += SAMPLE_INTERVAL_MS;
+    }
+    // optionally do other non-blocking tasks here
   }
+  digitalWrite(ledRed, LOW);
+
+  float dc_red = redSum / redCount;                // average  
+  float ac_red_ptp = redMax - redMin;             // peak-to-peak  
+  float ac_red_rms = sqrt( (redSqSum / redCount) - dc_red*dc_red );  // RMS of AC (approx)
+
+  Serial.print("RED: DC = "); Serial.print(dc_red,2);
+  Serial.print("  AC_ptp = "); Serial.print(ac_red_ptp,2);
+  Serial.print("  AC_rms = "); Serial.println(ac_red_rms,2);
+
+  delay(200); // short pause before next phase (if desired)
+
+  // --- IR phase ---
+  digitalWrite(ledRed, LOW);
+  digitalWrite(ledIR,  HIGH);
+
+  t0 = millis();
+  nextSample = t0;
+
+  float irSum = 0;
+  float irSqSum = 0;
+  int   irMin = 1023, irMax = 0;
+  int   irCount = 0;
+
+  while (millis() - t0 < IR_PERIOD_MS) {
+    unsigned long now = millis();
+    if (now >= nextSample) {
+      int v = analogRead(adcPin);
+      irSum   += v;
+      irSqSum += (float)v * v;
+      if (v < irMin) irMin = v;
+      if (v > irMax) irMax = v;
+      irCount++;
+      nextSample += SAMPLE_INTERVAL_MS;
+    }
+    // optionally do other non-blocking tasks here
+  }
+  digitalWrite(ledIR, LOW);
+
+  float dc_ir = irSum / irCount;
+  float ac_ir_ptp = irMax - irMin;
+  float ac_ir_rms = sqrt( (irSqSum / irCount) - dc_ir*dc_ir );
+
+  Serial.print("IR : DC = "); Serial.print(dc_ir,2);
+  Serial.print("  AC_ptp = "); Serial.print(ac_ir_ptp,2);
+  Serial.print("  AC_rms = "); Serial.println(ac_ir_rms,2);
+
+  // --- Compute ratio & SpO₂ (using peak-to-peak or rms AC) ---
+  // Using PTP-based AC:
+  float R_ptp = (ac_red_ptp / dc_red) / (ac_ir_ptp / dc_ir);
+  float spo2_ptp = 110.0 - 25.0 * R_ptp;
+
+  // Using RMS-based AC:
+  float R_rms = (ac_red_rms / dc_red) / (ac_ir_rms / dc_ir);
+  float spo2_rms = 110.0 - 25.0 * R_rms;
+
+  Serial.print("SpO2 (ptp) = "); Serial.print(spo2_ptp,1);
+  Serial.print("  SpO2 (rms) = "); Serial.println(spo2_rms,1);
+
+  delay(1000);  // wait a bit before starting next RED cycle
 }
